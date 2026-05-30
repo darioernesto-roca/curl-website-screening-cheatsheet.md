@@ -461,7 +461,223 @@ Use it for:
 
 ---
 
-# 9) Timing and availability checks
+# 9) SPA, prerendering, and policy disclosure audits
+
+These commands diagnose what crawlers actually see when fetching a JavaScript-rendered site. A single-page application (SPA) often returns a small HTML shell on the initial request, with all content injected after the JavaScript bundle runs. Crawlers that do not execute JavaScript see only the shell. This matters for SEO indexing, Google Ads / AdSense policy review, accessibility audits, and any case where a third party evaluates a site without running JS.
+
+## 33. Inspect the raw HTML body as a single line
+```bash
+curl -s https://example.com/ | tr -d '\n' | sed 's/  */ /g'
+```
+What it does:
+- fetches the raw HTML response with no JS execution
+- collapses the body into a single readable line
+- shows exactly what a non-rendering crawler receives
+
+Use it for:
+- detecting whether the body is a near-empty SPA shell (`Loading...`) or contains real content
+- auditing whether legally-required disclosures, footer text, or canonical tags are present in the initial response
+- comparing what a crawler sees against what a real browser renders
+
+## 34. Compare response body size across multiple URLs
+```bash
+for url in https://example.com/ https://example.org/ https://example.net/; do
+  echo "=== $url ==="
+  curl -s "$url" | wc -c
+done
+```
+What it does:
+- prints the byte count of the raw HTML body for each URL
+
+Use it for:
+- a fast first-pass heuristic: typical SPA shells return 1–10 KB, fully rendered or prerendered pages return 50–500 KB
+- spotting sites built from a shared template (similar byte counts across domains)
+- detecting when one domain in a network was not deployed with the same fix as the others
+
+## 35. Search the raw body for specific content terms
+```bash
+url=https://example.com/
+html=$(curl -s "$url")
+for term in "Operated by" "Terms of Sale" "Refund" "Privacy" "Loading"; do
+  count=$(echo "$html" | grep -ic "$term")
+  printf "  %-20s : %d hits\n" "$term" "$count"
+done
+```
+What it does:
+- fetches the page once, then searches the raw body for multiple substrings
+- prints a hit count per term
+
+Use it for:
+- confirming that policy-relevant disclosures (operator attribution, refund policy, terms, privacy) appear in the initial HTML
+- auditing whether the static HTML contains the same content an appeal or claim references
+- regression-testing after a deploy: terms that previously returned zero hits should now return non-zero
+
+Note: when the HTML is delivered as one long line (common for build-time prerendered output), `grep -c` returns `1` for any matched term because there is only one line to match against. A value of `1` therefore means "present at least once," not "appears exactly once." Use `grep -o ... | wc -l` if true occurrence count is needed.
+
+## 36. Simulate AdsBot (desktop)
+```bash
+curl -I -A "AdsBot-Google (+http://www.google.com/adsbot.html)" https://example.com/
+```
+What it does:
+- sends Google's AdsBot desktop User-Agent
+
+Use it for:
+- testing whether Google Ads policy review crawlers receive different content than browsers
+- diagnosing why a paid-media landing page failed an automated policy check
+
+## 37. Simulate AdsBot-Mobile
+```bash
+curl -I -A "Mozilla/5.0 (Linux; Android 5.0; SM-G920A) AppleWebKit (KHTML, like Gecko) Chrome Mobile Safari (compatible; AdsBot-Google-Mobile; +http://www.google.com/mobile/adsbot.html)" https://example.com/
+```
+What it does:
+- sends Google's AdsBot mobile User-Agent
+
+Use it for:
+- mobile-specific Google Ads policy review tests
+- confirming the same fix applies to mobile and desktop crawlers
+
+## 38. Verify byte-identical responses across multiple user agents
+```bash
+curl -s -A "curl/8.0" -o body-default.html https://example.com/
+curl -s -A "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" -o body-googlebot.html https://example.com/
+curl -s -A "AdsBot-Google (+http://www.google.com/adsbot.html)" -o body-adsbot.html https://example.com/
+curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" -o body-chrome.html https://example.com/
+
+md5sum body-default.html body-googlebot.html body-adsbot.html body-chrome.html
+```
+What it does:
+- saves the response body to a file for each user agent
+- computes an MD5 hash of each
+- identical hashes across all UAs prove the server returns the same content regardless of client identity
+
+Use it for:
+- confirming the absence of user-agent-based cloaking
+- a stronger artifact than `diff` (one number per file, easy to attach to a ticket or appeal)
+- post-fix verification when the goal was to remove UA-based response variation
+
+Interpretation:
+- all hashes identical → no UA discrimination at the body layer
+- any hash differs → server is varying the response by user agent (cloaking-shaped behavior; investigate)
+
+## 39. Discover prerendered vs non-prerendered routes
+```bash
+for path in / /terms /terms-of-sale /privacy /privacy-policy /refund /refund-policy /book /booking /checkout; do
+  url="https://example.com${path}"
+  code=$(curl -s -o /dev/null -w "%{http_code}" "$url")
+  size=$(curl -s "$url" | wc -c)
+  printf "%-55s %s  %s bytes\n" "$url" "$code" "$size"
+done
+```
+What it does:
+- requests each path and prints the HTTP code and body size
+
+Use it for:
+- identifying which routes are individually prerendered (real HTML at distinct byte sizes) vs which serve a generic SPA fallback (uniformly small responses)
+- confirming that policy-critical routes (Terms, Refund, Privacy) return their own content, not just the SPA shell
+- mapping the actual surface area of a build-time prerendered site
+
+Interpretation:
+- variable byte counts per route → routes are individually prerendered
+- uniform small byte count across routes that all return `200` → SPA catchall (Vercel/Netlify-style "any unmatched route serves the shell"), not actual published pages
+- the catchall pages are not necessarily a problem if no link on the site or in ad campaigns points to them; they are only a problem if a crawler can discover and follow them
+
+## 40. Detect third-party prerender services in response headers
+```bash
+curl -sI https://example.com/ | grep -iE "^(x-prerender|x-rendered-by|x-served-by|x-rendertron)"
+```
+What it does:
+- looks for response headers that identify external prerender middleware (prerender.io, Rendertron, custom render proxies)
+
+Use it for:
+- distinguishing build-time prerendering (no service headers, content baked into static files) from runtime bot-targeted prerendering (service headers present, content rendered on demand)
+- detecting whether the site uses User-Agent sniffing to serve different content to bots — a pattern Google formally deprecated in 2022 and which can be classified as cloaking under stricter review
+
+Interpretation:
+- no output → no prerender service in the response path
+- one or more matching headers → a runtime prerender service is active; investigate whether it conditionally renders based on UA
+
+## 41. Extract targeted rendering signals from response headers
+```bash
+curl -sI https://example.com/ | grep -iE "^(server|cache-control|content-type|vary|age|x-vercel-cache|x-cache|x-prerender|cf-cache-status):"
+```
+What it does:
+- pulls the headers most relevant to rendering and caching diagnosis
+
+Use it for:
+- quickly classifying the response source (origin vs edge cache vs prerender service)
+- spotting `Vary: User-Agent`, which explicitly declares UA-based response variation
+- confirming whether the page is being served from CDN cache (consistent with static prerendering)
+
+What to inspect:
+- `Vary` — must NOT include `User-Agent` for a UA-neutral site
+- `X-Vercel-Cache: HIT` / `X-Cache: HIT` / `CF-Cache-Status: HIT` → response served from edge cache, consistent with prerendered static output
+- `X-Prerender-*` → bot-targeted prerender middleware in use
+- `Cache-Control: public, max-age=...` → CDN-cacheable response
+- `Age: N` → response is N seconds old from cache
+
+## 42. Compare cache behavior per route
+```bash
+for path in / /terms-of-sale /privacy-policy /refund-policy /booking; do
+  echo "=== https://example.com${path} ==="
+  curl -sI "https://example.com${path}" | grep -iE "^(cache-control|x-vercel-cache|age|content-type):"
+  echo
+done
+```
+What it does:
+- per route, prints the cache-related headers
+
+Use it for:
+- confirming all prerendered routes share the same cache pattern (consistent build-time output)
+- spotting routes that serve a different cache profile (dynamic vs static, fallback vs real content)
+- correlating which routes are real prerendered pages vs SPA catchall fallbacks
+
+## 43. Compare response headers across user agents
+```bash
+curl -sI -A "curl/8.0" https://example.com/ > headers-default.txt
+curl -sI -A "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" https://example.com/ > headers-googlebot.txt
+curl -sI -A "AdsBot-Google (+http://www.google.com/adsbot.html)" https://example.com/ > headers-adsbot.txt
+
+for f in default googlebot adsbot; do
+  grep -ivE "^(date|age|x-vercel-id|x-request-id|cf-ray|x-amz-cf-id):" headers-${f}.txt | sort > headers-${f}-clean.txt
+done
+
+diff headers-default-clean.txt headers-googlebot-clean.txt
+diff headers-default-clean.txt headers-adsbot-clean.txt
+```
+What it does:
+- captures response headers per UA
+- strips request-specific noise (timestamps, request IDs)
+- diffs the cleaned headers
+
+Use it for:
+- detecting UA-based behavior at the header layer (different `Cache-Control`, different `Vary`, different `X-*` headers) even when the body is byte-identical
+- catching subtle cloaking patterns that only surface in headers
+
+Interpretation:
+- no diff output → headers are identical modulo timestamps; no UA-based behavior at the HTTP layer
+- meaningful diff → server differentiates response headers by UA; investigate the cause
+
+## 44. One-shot SPA / prerendering diagnostic
+```bash
+for url in https://example.com/ https://example.org/ https://example.net/; do
+  size=$(curl -s "$url" | wc -c)
+  html=$(curl -s "$url")
+  disclosures=$(echo "$html" | grep -ic -E "(operated by|terms of sale|refund|privacy)")
+  loading=$(echo "$html" | grep -ic "loading")
+  printf "%-45s size=%-6s disclosures=%-2s loading_placeholder=%s\n" "$url" "$size" "$disclosures" "$loading"
+done
+```
+What it does:
+- per URL, reports body size, count of policy disclosures present, and whether a loading placeholder is still in the response
+
+Use it for:
+- a single pass/fail snapshot across a network of similar sites
+- post-fix verification: compare before-and-after numbers
+- regression alerts: a domain that previously had `disclosures>=1` now reporting `disclosures=0` is a deployment problem
+
+---
+
+# 10) Timing and availability checks
 
 ## 28. Show only the final HTTP code
 ```bash
@@ -485,7 +701,7 @@ Use it for:
 
 ---
 
-# 10) Practical website screening workflows
+# 11) Practical website screening workflows
 
 ## Workflow A: Is the homepage blocked?
 ```bash
@@ -593,9 +809,69 @@ curl -L https://example.com/ | grep -i 'application/ld+json'
 Interpretation:
 - check canonical tags and structured-data domain consistency
 
+## Workflow F: SPA rendering audit for policy review crawler visibility
+> Use this when a JS-rendered site (SPA) needs to expose its content to non-rendering crawlers — typically Google Ads policy review, AdSense review, or any context where an automated reviewer fetches the URL without executing JavaScript. Verifies that the static HTML response contains the disclosures and policy content the site claims to display, and that this content is the same regardless of user agent.
+
+```bash
+# 1. Inspect the raw HTML body — what does a non-rendering crawler actually see?
+curl -s https://example.com/ | tr -d '\n' | sed 's/  */ /g'
+
+# 2. Body size across a network of related sites — confirm consistent deployment
+for url in https://example.com/ https://example.org/ https://example.net/; do
+  echo "=== $url ==="
+  curl -s "$url" | wc -c
+done
+
+# 3. Disclosure / policy term presence in the raw HTML
+for url in https://example.com/ https://example.org/ https://example.net/; do
+  echo "=== $url ==="
+  html=$(curl -s "$url")
+  for term in "Operated by" "Terms of Sale" "Refund" "Privacy"; do
+    count=$(echo "$html" | grep -ic "$term")
+    printf "  %-20s : %d hits\n" "$term" "$count"
+  done
+done
+
+# 4. UA neutrality check — same response bytes for every user agent?
+curl -s -A "curl/8.0" -o body-default.html https://example.com/
+curl -s -A "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" -o body-googlebot.html https://example.com/
+curl -s -A "AdsBot-Google (+http://www.google.com/adsbot.html)" -o body-adsbot.html https://example.com/
+curl -s -A "Mozilla/5.0 (Linux; Android 5.0; SM-G920A) AppleWebKit (KHTML, like Gecko) Chrome Mobile Safari (compatible; AdsBot-Google-Mobile; +http://www.google.com/mobile/adsbot.html)" -o body-adsbot-mobile.html https://example.com/
+md5sum body-default.html body-googlebot.html body-adsbot.html body-adsbot-mobile.html
+
+# 5. Per-route content discovery — are policy pages individually prerendered?
+for path in / /terms-of-sale /privacy-policy /refund-policy; do
+  url="https://example.com${path}"
+  code=$(curl -s -o /dev/null -w "%{http_code}" "$url")
+  size=$(curl -s "$url" | wc -c)
+  printf "%-55s %s  %s bytes\n" "$url" "$code" "$size"
+done
+
+# 6. Prerender service detection — should be empty for build-time prerendering
+curl -sI https://example.com/ | grep -iE "^(x-prerender|x-rendered-by|x-served-by|x-rendertron)"
+
+# 7. Targeted header signals (cache state, Vary, server)
+curl -sI https://example.com/ | grep -iE "^(server|cache-control|content-type|vary|age|x-vercel-cache|x-cache|x-prerender|cf-cache-status):"
+```
+
+Interpretation:
+- Step 1 reveals the exact content non-rendering crawlers receive. A near-empty shell ending in `Loading...` indicates JS-only rendering; real HTML with disclosures indicates SSR or build-time prerendering.
+- Step 2 confirms a network of related sites all deployed the same fix; outlier byte counts suggest one domain missed the deploy.
+- Step 3 confirms the policy-critical disclosures the site claims to display are actually present in the raw HTML response.
+- Step 4 is the cloaking-detection control. Identical MD5 hashes across UAs prove the server returns the same content regardless of client identity. Differing hashes indicate UA-based response variation, which can be classified as cloaking — especially risky for accounts under existing policy suspension.
+- Step 5 confirms each policy-relevant route returns its own real content rather than a generic SPA fallback. Different byte counts across routes indicate per-route prerendering.
+- Step 6 distinguishes build-time prerendering (no service headers, UA-neutral, safe) from runtime bot-targeted middleware (service headers present, often UA-conditional, can be flagged as cloaking).
+- Step 7 catches edge cases: `Vary: User-Agent` would indicate explicit UA-based variation even when the body MD5 matches; `X-Vercel-Cache: HIT` (or equivalent) confirms the static prerendered output is being served from the edge cache.
+
+This workflow is appropriate when:
+- A paid-media landing page failed Google Ads policy review and the site is JS-rendered
+- An organic-search audit shows a JS-rendered site is being indexed without its full content
+- A site went through a render-mode change (SPA → SSR/prerendered) and you need to verify the fix shipped correctly across multiple domains
+- An appeal to a policy review team needs a concrete artifact showing what the review crawler currently sees vs. what it should see
+
 ---
 
-# 11) Useful notes for Windows users
+# 12) Useful notes for Windows users
 
 In Git Bash, the examples above usually work as written.
 
@@ -610,7 +886,7 @@ Using `curl.exe` avoids confusion with PowerShell aliases.
 
 ---
 
-# 12) Focused sources worth reading
+# 13) Focused sources worth reading
 
 These are the least noisy, most relevant sources for going deeper.
 
@@ -652,7 +928,7 @@ Useful for quickly understanding what returned headers mean.
 
 ---
 
-# 13) A compact starter pack for your own work
+# 14) A compact starter pack for your own work
 
 These are the 10 commands I would keep closest for website technical screening.
 
@@ -660,10 +936,14 @@ These are the 10 commands I would keep closest for website technical screening.
 curl -I https://example.com/
 curl -I -L https://example.com/
 curl -I -A "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" https://example.com/
+curl -I -A "AdsBot-Google (+http://www.google.com/adsbot.html)" https://example.com/
 curl -I -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" https://example.com/
 curl -I -H "Accept-Language: fr-CA,fr;q=0.9,en;q=0.8" https://example.com/
 curl -v https://example.com/
 curl -D headers.txt -o body.html https://example.com/
+curl -s https://example.com/ | tr -d '\n' | sed 's/  */ /g'
+curl -s https://example.com/ | wc -c
+curl -sI https://example.com/ | grep -iE "^(server|cache-control|vary|x-vercel-cache|x-cache|x-prerender|cf-cache-status):"
 curl -L https://example.com/ | grep -i canonical
 curl -s -o /dev/null -w "%{http_code}\n" https://example.com/
 curl -s -o /dev/null -w "code=%{http_code} dns=%{time_namelookup} connect=%{time_connect} tls=%{time_appconnect} ttfb=%{time_starttransfer} total=%{time_total}\n" https://example.com/
@@ -671,7 +951,7 @@ curl -s -o /dev/null -w "code=%{http_code} dns=%{time_namelookup} connect=%{time
 
 ---
 
-# 14) Final advice
+# 15) Final advice
 
 For website review work, do not rely on a single request.
 

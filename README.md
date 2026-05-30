@@ -38,6 +38,10 @@ Use the cheatsheet when you need to quickly answer questions like:
 - Is Googlebot seeing a different route than Chrome?
 - Are canonical signals and HTML domain references aligned?
 - Are API endpoints and CORS preflight configured correctly?
+- Is a JavaScript-rendered SPA exposing its content to non-rendering crawlers, or returning only a loading shell?
+- Are policy-required disclosures (operator attribution, Terms, Refund, Privacy) present in the raw HTML that Google Ads / AdSense review crawlers see?
+- Did a build-time prerendering or SSR deploy ship correctly across every domain in a network of related sites?
+- Is the response identical across user agents, or is the server varying content by UA in a way that could be classified as cloaking?
 
 ## Quick start
 
@@ -97,18 +101,22 @@ Recommended reading order in `curl-website-screening-cheatsheet.md`:
 5. **Cookie/session testing**
 6. **Verbose debugging and timing checks**
 7. **POST/API and CORS checks**
-8. **Practical workflows**
+8. **Content retrieval and pattern checks**
+9. **SPA, prerendering, and policy disclosure audits**
+10. **Practical workflows**
 
-If you're new, start with Workflows A–D and then drill into command sections for deeper analysis.
+If you're new, start with Workflows A–F and then drill into command sections for deeper analysis. Workflow F specifically covers the SPA / policy-review use case (Google Ads disclosure visibility, build-time prerendering verification, cloaking-shape detection).
 
 ## Operational best practices
 
-- **Always test multiple identities**: default `curl`, Googlebot-like UA, and browser-like UA.
+- **Always test multiple identities**: default `curl`, Googlebot-like UA, AdsBot-like UA, and browser-like UA.
 - **Test both transport and hostname variants**: `http`, `https`, `www`, non-`www`.
 - **Preserve artifacts**: save headers/body for reproducibility.
 - **Avoid one-command conclusions**: compare at least 2–3 controlled requests.
 - **Run checks from the same network environment** when diagnosing geofenced/CDN behavior.
 - **Document timestamp and command used** in tickets and client communications.
+- **For SPAs and JS-rendered sites, fetch the raw body and verify content presence directly** — don't rely on browser-rendered output. A page that looks correct in Chrome may return a near-empty shell to any client that doesn't execute JavaScript, including paid-media policy review crawlers.
+- **Use `md5sum` to confirm byte-identical responses across user agents** when verifying a no-cloaking fix. One hash per UA is cleaner evidence than a multi-line `diff` and is easy to attach to an appeal or audit trail.
 
 ## Suggested team workflow
 
@@ -117,7 +125,8 @@ If you're new, start with Workflows A–D and then drill into command sections f
 3. Capture headers/body artifacts.
 4. Validate cookie/session dependencies.
 5. Confirm canonical + redirect + HTML consistency.
-6. Post findings with exact commands and outputs in issue tracker.
+6. For JS-rendered sites: inspect the raw body (`curl -s | wc -c` and content grep) before concluding content is present.
+7. Post findings with exact commands and outputs in issue tracker.
 
 ## Windows note
 
